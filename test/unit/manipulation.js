@@ -2460,7 +2460,9 @@ test( "Sanitized HTML doesn't get unsanitized", function() {
 			"<noscript/><img src=url404 onerror=XSS>",
 			"<textarea><textarea/><img src=url404 onerror=XSS>",
 			"<!--<x--/><img src=url404 onerror=XSS>-->",
-			"<svg><![CDATA[<x]]/><img src=url404 onerror=XSS>]]></svg>"
+			"<svg><![CDATA[<x]]/><img src=url404 onerror=XSS>]]></svg>",
+			"<option><style></option></select><img src=url404 onerror=XSS></style>",
+			"<optgroup><style></optgroup></select><img src=url404 onerror=XSS></style>"
 		],
 		injected = [];
 
@@ -2496,4 +2498,130 @@ test( "Sanitized HTML doesn't get unsanitized", function() {
 		});
 		start();
 	}, 1000 );
+});
+
+test( "Sanitized <option> HTML doesn't get unsanitized by any insertion method (CVE-2020-11023)", function() {
+
+	var container,
+		calls = [],
+		injected = [],
+
+		// Each payload is inert when parsed in a regular context: the <img> is only
+		// text inside a <style> element. Parsed inside a <select> wrapper, the <style>
+		// tag is dropped and </select> breaks out of the wrapper, creating a live <img>.
+		inputs = [
+			"<option><style></option></select><img src=url404 onerror=XSS></style>",
+			"<optgroup><style></optgroup></select><img src=url404 onerror=XSS></style>",
+			"<OPTION><style></OPTION></select><img src=url404 onerror=XSS></style>"
+		],
+		methods = {
+			"html": function( div, html ) {
+				div.html( html );
+			},
+			"append": function( div, html ) {
+				div.append( html );
+			},
+			"prepend": function( div, html ) {
+				div.prepend( html );
+			},
+			"before": function( div, html ) {
+				jQuery("<span></span>").appendTo( div ).before( html );
+			},
+			"after": function( div, html ) {
+				jQuery("<span></span>").appendTo( div ).after( html );
+			},
+			"replaceWith": function( div, html ) {
+				jQuery("<span></span>").appendTo( div ).replaceWith( html );
+			},
+			"jQuery": function( div, html ) {
+				jQuery( html ).appendTo( div );
+			},
+			"jQuery.parseHTML": function( div, html ) {
+				div.append( jQuery.parseHTML( html ) );
+			}
+		},
+		methodCount = 0;
+
+	jQuery.each( methods, function() {
+		methodCount++;
+	});
+
+	expect( inputs.length * methodCount * 2 );
+
+	Globals.register("xss");
+	window["xss"] = function( id ) {
+		calls.push( id );
+	};
+
+	container = jQuery("<div></div>").appendTo("#qunit-fixture");
+
+	jQuery.each( inputs, function( i, input ) {
+		jQuery.each( methods, function( method, insert ) {
+			var id = injected.length,
+				htmlString = input.replace( "XSS", "xss(" + id + ")" ),
+				div = jQuery("<div></div>").appendTo( container );
+
+			injected.push( method + "(): " + htmlString );
+
+			// Load the HTML via jQuery
+			insert( div, htmlString );
+
+			equal( div.find("[onerror]").length, 0,
+				"No element with an inline event handler was created, " + injected[ id ] );
+		});
+	});
+
+	stop();
+	setTimeout(function() {
+		jQuery.each( injected, function( id, label ) {
+			ok( jQuery.inArray( id, calls ) === -1, "Insecure code wasn't executed, " + label );
+		});
+		start();
+	}, 1000 );
+});
+
+test( "<option> and <optgroup> HTML can't break out of a <select> wrapper (CVE-2020-11023)", function() {
+
+	var tags = [ "option", "optgroup" ],
+		methods = {
+			"jQuery": function( html ) {
+				return jQuery( html );
+			},
+			"jQuery.parseHTML": function( html ) {
+				return jQuery( jQuery.parseHTML( html ) );
+			},
+			"html": function( html ) {
+				return jQuery("<div></div>").html( html ).contents();
+			},
+			"append": function( html ) {
+				return jQuery("<div></div>").append( html ).contents();
+			}
+		};
+
+	// Support: IE <=9 only
+	// Old IE drops <option> tags outside of a select, so the wrapper is still needed there.
+	if ( jQuery.support.option === false ) {
+		expect( 1 );
+		ok( true, "<option> needs a <select> wrapper in this browser" );
+		return;
+	}
+
+	expect( tags.length * 4 * 3 );
+
+	jQuery.each( tags, function( i, tag ) {
+
+		// A stray </select> is ignored in a regular context, so it must not be able
+		// to close a wrapper jQuery added and move the following markup elsewhere.
+		var html = "<" + tag + ">a</" + tag + "></select><b>c</b>";
+
+		jQuery.each( methods, function( method, parse ) {
+			var nodes = parse( html );
+
+			equal( nodes.length, 2, method + "(): all top-level nodes were kept, " + html );
+			equal( nodes[ 0 ] && nodes[ 0 ].nodeName.toLowerCase(), tag,
+				method + "(): <" + tag + "> was created, " + html );
+			equal( nodes[ 1 ] && nodes[ 1 ].nodeName.toLowerCase(), "b",
+				method + "(): <b> stayed a sibling, " + html );
+		});
+	});
 });
